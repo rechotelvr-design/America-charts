@@ -1,26 +1,24 @@
 
 import os
-import json
-import uuid
+import re
 from pathlib import Path
 from datetime import datetime, timezone
+from urllib.parse import urljoin
 
 import requests
 
 WEBHOOK = os.environ["DISCORD_WEBHOOK_URL"].strip()
 MESSAGE_FILE = Path("message_id.txt")
-SESSION = str(uuid.uuid4())
+
+US_CHART_URL = (
+    "https://rivalducks.com/apps/radar/charts/"
+    "top-playing-now?country=us"
+)
+GAMES_URL = "https://games.roblox.com/v1/games"
 
 HEADERS = {
-    "User-Agent": "RobloxTabLeaderboard/1.0",
+    "User-Agent": "RobloxTabAmericaLeaderboard/1.0",
 }
-
-EXPLORE_URL = (
-    "https://apis.roblox.com/explore-api/v1/"
-    "get-sort-content"
-)
-
-GAMES_URL = "https://games.roblox.com/v1/games"
 
 
 def get_json(url, params=None):
@@ -28,69 +26,60 @@ def get_json(url, params=None):
         url,
         params=params,
         headers=HEADERS,
-        timeout=25,
+        timeout=30,
     )
     response.raise_for_status()
     return response.json()
 
 
-def find_universe_ids(data):
-    """Extract game universe IDs while preserving chart order."""
+def get_us_chart_ids():
+    """Extract game universe IDs in order from the US chart page."""
+    response = requests.get(
+        US_CHART_URL,
+        headers=HEADERS,
+        timeout=30,
+    )
+    response.raise_for_status()
+    html = response.text
+
+    # Rival Ducks game links contain the universe ID in the URL slug.
+    pattern = re.compile(
+        r"""href\s*=\s*["']([^"']*/apps/radar/games/
+        (\d+)-[^"']*)["']""",
+        re.IGNORECASE | re.VERBOSE,
+    )
+
     ids = []
     seen = set()
 
-    def walk(obj):
-        if isinstance(obj, dict):
-            for key, value in obj.items():
-                if key.lower() in ("universeid", "universe_id"):
-                    try:
-                        game_id = int(value)
-                        if game_id not in seen:
-                            seen.add(game_id)
-                            ids.append(game_id)
-                    except (TypeError, ValueError):
-                        pass
+    for match in pattern.finditer(html):
+        game_url = urljoin(US_CHART_URL, match.group(1))
+        universe_id = int(match.group(2))
 
-                walk(value)
+        if "rivalducks.com/apps/radar/games/" not in game_url:
+            continue
 
-        elif isinstance(obj, list):
-            for item in obj:
-                walk(item)
+        if universe_id not in seen:
+            seen.add(universe_id)
+            ids.append(universe_id)
 
-        elif isinstance(obj, str) and obj.startswith(("{", "[")):
-            try:
-                walk(json.loads(obj))
-            except json.JSONDecodeError:
-                pass
+        if len(ids) >= 10:
+            break
 
-    walk(data)
+    if len(ids) < 10:
+        raise RuntimeError(
+            f"Only found {len(ids)} unique game IDs on the US chart. "
+            "Rival Ducks may have changed its page structure or "
+            "may not be returning the chart rows in its HTML."
+        )
+
+    print("US chart game IDs:", ids)
     return ids
 
 
 def get_top_games():
-    discovery = get_json(
-        EXPLORE_URL,
-        {
-            "sessionId": SESSION,
-            "sortId": "top-playing-now",
-            "device": "all",
-            "country": "all",
-            "maxRows": 100,
-        },
-    )
-
-    ids = find_universe_ids(discovery)
-
-    print("Chart response keys:", list(discovery.keys()))
-    print("Unique universe IDs found:", len(ids))
-
-    if not ids:
-        raise RuntimeError(
-            "No game IDs found in Roblox's chart response. "
-            "The API response may have changed."
-        )
-
-    # Fetch metadata in batches, keeping the original chart order.
+    # The order comes from the US chart, not global player counts.
+    ids = get_us_chart_ids()
     games_by_id = {}
 
     for start in range(0, len(ids), 50):
@@ -112,18 +101,17 @@ def get_top_games():
         if game and isinstance(game.get("playing"), (int, float)):
             games.append(game)
 
-    # Rank by the latest live player count.
-    games.sort(
-        key=lambda game: game["playing"],
-        reverse=True,
-    )
+    if len(games) < 10:
+        raise RuntimeError(
+            f"Roblox returned player counts for only {len(games)} "
+            "of the 10 US chart games. Refusing to publish an "
+            "incomplete leaderboard."
+        )
 
-    print("Games with player counts:", len(games))
-
-    for game in games[:10]:
+    for rank, game in enumerate(games, 1):
         print(
-            f'{game.get("name", "Unknown")}: '
-            f'{int(game["playing"]):,} players'
+            f'{rank}. {game.get("name", "Unknown")}: '
+            f'{int(game["playing"]):,} worldwide players'
         )
 
     return games[:10]
@@ -135,8 +123,8 @@ def make_embed(games):
     for rank, game in enumerate(games, 1):
         name = game.get("name", "Unknown game")
         name = name.replace("[", "").replace("]", "")
-
         place_id = game.get("rootPlaceId")
+
         link = (
             f"https://www.roblox.com/games/{place_id}"
             if place_id
@@ -147,17 +135,17 @@ def make_embed(games):
 
         lines.append(
             f"**{rank}. [{name}]({link})** — "
-            f"👥 {players:,} playing"
+            f"🌎 {players:,} worldwide playing"
         )
 
     return {
-        "title": "🏆 Top 10 Roblox Games Right Now",
+        "title": "🇺🇸 US Top 10 Roblox Games",
         "description": "\n".join(lines),
         "color": 0x00A2FF,
         "footer": {
             "text": (
-                "Roblox Tab • Worldwide chart • "
-                "Refreshes every 10 minutes"
+                "Rival Ducks US chart ranking • "
+                "Worldwide player counts • Updates every 10 minutes"
             )
         },
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -177,34 +165,30 @@ def publish(embed):
         response = requests.patch(
             url,
             json={"embeds": [embed]},
-            timeout=25,
+            timeout=30,
         )
 
         if response.status_code != 404:
             response.raise_for_status()
-            print("Updated existing leaderboard.")
+            print("Updated existing USA leaderboard.")
             return
 
-        print("Old message missing; creating a replacement.")
+        print("Saved message was not found; creating a replacement.")
 
     response = requests.post(
         WEBHOOK,
         params={"wait": "true"},
         json={"embeds": [embed]},
-        timeout=25,
+        timeout=30,
     )
     response.raise_for_status()
 
     message_id = response.json()["id"]
     MESSAGE_FILE.write_text(message_id + "\n")
 
-    print("Created leaderboard:", message_id)
+    print("Created USA leaderboard:", message_id)
 
 
 if __name__ == "__main__":
     games = get_top_games()
-
-    if not games:
-        raise RuntimeError("Roblox returned no games.")
-
     publish(make_embed(games))
