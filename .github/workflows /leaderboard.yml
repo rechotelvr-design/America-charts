@@ -1,5 +1,4 @@
-
-name: Update Roblox Tab Leaderboard
+name: Roblox Tab America Top 10
 
 on:
   schedule:
@@ -11,9 +10,8 @@ permissions:
   actions: write
 
 concurrency:
-  group: roblox-tab-leaderboard
+  group: roblox-tab-america-leaderboard
   cancel-in-progress: true
-
 
 jobs:
   update:
@@ -31,7 +29,7 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Update leaderboard
+      - name: Update America Top 10 leaderboard
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: python leaderboard.py
@@ -42,7 +40,7 @@ jobs:
           if ! git diff --cached --quiet; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git commit -m "Save leaderboard message ID"
+            git commit -m "Save America leaderboard message ID"
             git pull --rebase origin HEAD
             git push
           fi
@@ -51,11 +49,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
-          WORKFLOW_ID: ${{ github.workflow }}
+          WORKFLOW_FILE: leaderboard.yml
         run: |
           gh run list \
             --repo "$REPO" \
-            --workflow "$WORKFLOW_ID" \
+            --workflow "$WORKFLOW_FILE" \
             --limit 100 \
             --json databaseId \
             --jq '.[3:] | .[].databaseId' |
